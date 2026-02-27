@@ -84,12 +84,12 @@ def main():
         **config
     ).to(args.device)
 
-    model.train() # 即使只测前向，通常也保持 train 模式以模拟真实训练场景（除非明确为了推理测试）
+    model.train() 
 
     # 2. 准备数据
     input_ids, labels = generate_data(args.batch_size, args.context_length, args.vocab_size, args.device)
 
-    # 3. 预热 (Warm-up) - 不记录时间
+    # 3. 预热 (Warm-up)
     print(f"Warming up for {args.warmup_steps} steps...")
     for _ in range(args.warmup_steps):
         logits = model(input_ids)
@@ -101,32 +101,48 @@ def main():
 
     # 4. 正式计时 (Benchmarking)
     print(f"Benchmarking for {args.num_steps} steps...")
-    times = []
+    fwd_times = []
+    bwd_times = []
+    total_times = []
     timer = time.perf_counter 
 
     for _ in range(args.num_steps):
-        torch.cuda.synchronize() # 确保上一步彻底结束
+        torch.cuda.synchronize()
         start_time = timer()
         
         logits = model(input_ids)
         
+        torch.cuda.synchronize()
+        mid_time = timer()
+        fwd_times.append(mid_time - start_time)
+
         if args.mode == "fwd_bwd":
             loss = logits.sum()
             loss.backward()
             model.zero_grad(set_to_none=True)
             
-        torch.cuda.synchronize() # 等待这一步的所有 CUDA 核完成
-        end_time = timer()
-        times.append(end_time - start_time)
+            torch.cuda.synchronize()
+            end_time = timer()
+            bwd_times.append(end_time - mid_time)
+            total_times.append(end_time - start_time)
+        else:
+            total_times.append(mid_time - start_time)
 
     # 5. 统计结果
-    times = np.array(times)
-    avg_time = np.mean(times)
-    std_time = np.std(times)
-
+    fwd_times = np.array(fwd_times)
+    fwd_avg, fwd_std = np.mean(fwd_times), np.std(fwd_times)
+    
     print(f"\nResults ({args.mode}):")
-    print(f"Average time per step: {avg_time*1000:.2f} ms")
-    print(f"Standard deviation: {std_time*1000:.2f} ms")
+    print(f"Forward pass:  {fwd_avg*1000:.2f} ms ± {fwd_std*1000:.2f} ms")
+    
+    if args.mode == "fwd_bwd":
+        bwd_times = np.array(bwd_times)
+        bwd_avg, bwd_std = np.mean(bwd_times), np.std(bwd_times)
+        print(f"Backward pass: {bwd_avg*1000:.2f} ms ± {bwd_std*1000:.2f} ms")
+        
+        total_times = np.array(total_times)
+        total_avg, total_std = np.mean(total_times), np.std(total_times)
+        print(f"Total step:    {total_avg*1000:.2f} ms ± {total_std*1000:.2f} ms")
 
 if __name__ == "__main__":
     main()
